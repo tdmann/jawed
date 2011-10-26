@@ -48,6 +48,10 @@ class Jawed:
 	result = Jawed.get_instance().wait_for_job(job_number)
 	'''
 
+
+	LAST_SERVED_NONE = -1
+	JOB_COMPLETE = -2
+
 	_instance = None
 
 	@staticmethod
@@ -58,13 +62,25 @@ class Jawed:
 
 	def __init__(self):
 		self.jarfile = self.find_jarfile()
+
+		# the queue for all jobs which need to be processed
 		self._job_queue = Queue.Queue(0)
+
+		# the dictionary of all finished jobs,
+		# keyed by job number
 		self._finished_jobs = {}
 		self._finished_jobs_lock = threading.Lock()
+
+		# lock to prevent multiple job threads from starting
 		self._start_lock = threading.Lock()
+
+		# condition to allow listening for queue updates
 		self._update_condition = threading.Condition()
+
+		# the next job number to assign
 		self._job_number = 0
-		self._job_thread_running_lock = threading.Lock()
+		self._last_served = Jawed.LAST_SERVED_NONE
+		
 		self._thread = None
 
 	def find_jarfile(self):
@@ -92,19 +108,39 @@ class Jawed:
 		self._run_thread()
 		return job_number
 
+	def wait_status(self, job_number):
+		'''
+		If the job is finished, return immediately with Jawed.JOB_COMPLETE.
+		Otherwise, wait until the queue shifts, and either return the approximate 
+		position in line or Jawed.JOB_COMPLETE, depending on if the job finished.
+		'''
+		if self._job_finished(job_number):
+			return Jawed.JOB_COMPLETE
+		
+		self._update_condition.acquire()
+		self._update_condition.wait()
+		if self._job_finished(job_number):
+			result = Jawed.JOB_COMPLETE
+		else:
+			result = job_number - self._last_served
+		self._update_condition.release()
+
+		return result
+
 	def wait_for_job(self, job_number):
 		'''
-		Waits for a job to finish.
+		Waits for a job to finish. Removes the job from the 
+		finished jobs list when it finishes.
 		Takes a job number returned from queue_conversion_job.
 		'''
 		self._update_condition.acquire()
 		while not self._job_finished(job_number):
 			self._update_condition.wait()
-		finished = self._yank_finished_job(job_number)
+		finished = self.yank_finished_job(job_number)
 		self._update_condition.release()
 		return finished
 
-	def _yank_finished_job(self, job_number):
+	def yank_finished_job(self, job_number):
 		'''
 		Remove a job from the finished jobs list and return it.
 		'''
@@ -137,12 +173,17 @@ class Jawed:
 
 	def _job_thread(self):
 		'''
-		Thread for processing conversion jobs.
+		Thread for processing conversion jobs. Only runs until
+		there are no jobs left.
 		'''
 		while not self._job_queue.empty():
 			try:
 				conversion_job = self._job_queue.get(False)
 			except Queue.Empty:
+				# reset job numbers so they don't get crazy
+				# for a long running application
+				self._job_number = 0
+				self._last_served = Jawed.LAST_SERVED_NONE
 				break
 			command = "java -jar %s %s %s" % (self.jarfile, conversion_job['in'], conversion_job['out'])
 			subprocess.call(command, shell=True)
@@ -150,6 +191,7 @@ class Jawed:
 			self._finished_jobs_lock.acquire()
 			self._finished_jobs.update({conversion_job['job']:conversion_job})
 			self._finished_jobs_lock.release()
+			self._last_served = conversion_job['job']
 			self._update_condition.notify()
 			self._update_condition.release()
 		
@@ -227,7 +269,9 @@ class JawedTest(unittest.TestCase):
 		Thread for test_stress. Converts a single file and waits for the result.
 		'''
 		job = self.instance.queue_conversion_job('stress/test%d.odt' % i, 'stress/test%d.pdf' % i)
-		self.instance.wait_for_job(job)
+		while self.instance.wait_status(job) != Jawed.JOB_COMPLETE:
+			pass
+		self.instance.yank_finished_job(job)
 		self.assertTrue(os.path.exists('stress/test%d.pdf' % i))
 	
 # Run tests when file is executed
