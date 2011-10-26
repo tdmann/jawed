@@ -6,7 +6,7 @@ def read(fname):
 
 setup(
     name = "jawed",
-    version = "0.1",
+    version = "0.2",
     author = "Tim Mann",
     author_email = "tdmann@whaba.mn",
     description = ("A basic python wrapper for the JODConverter CLI"),
